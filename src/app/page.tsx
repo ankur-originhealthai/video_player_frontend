@@ -87,7 +87,7 @@ export default function App() {
     }, 50);
     return () => clearTimeout(handler);
   }, [sliderValue]);
-  // Sync currentIndex -> sliderValue
+
   useEffect(() => {
     if (sliderValue !== currentIndex) {
       setSliderValue(currentIndex);
