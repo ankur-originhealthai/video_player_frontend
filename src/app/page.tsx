@@ -5,14 +5,27 @@ import { Play, Pause, SkipBack, SkipForward } from "lucide-react";
 const socket = io("http://localhost:3002", { autoConnect: false });
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const framesRef = useRef<HTMLImageElement[]>([]); // Mutable buffer for frames
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [sliderValue, setSliderValue] = useState(0);
-  const [frameCount, setFrameCount] = useState(0); // Track frame count separately
+  const sliderRef = useRef<HTMLInputElement>(null);
+  const framesRef = useRef<HTMLImageElement[]>([]);
+  const frameCountRef = useRef(0);
+  const currentIndexRef = useRef(0);
+  const [frameCount, setFrameCount] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const rafId = useRef<number | null>(null);
-  // Receive batches and push images into framesRef
+  // :arrow_down: Draw frame without re-render
+  const drawFrame = (index: number) => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    const img = framesRef.current[index];
+    if (!canvas || !ctx || !img) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    if (sliderRef.current) {
+      sliderRef.current.value = index.toString();
+    }
+  };
+  // :arrow_down: Receive images from server
   useEffect(() => {
     socket.on("reply", (imageDataUrls: string[]) => {
       imageDataUrls.forEach((base64) => {
@@ -20,86 +33,67 @@ export default function App() {
         img.src = base64;
         img.onload = () => {
           framesRef.current.push(img);
+          frameCountRef.current++;
+          setFrameCount(frameCountRef.current); // one-time update for UI
         };
       });
-      // Update frame count once per batch
-      setFrameCount(framesRef.current.length);
     });
     socket.on("end-of-stream", () => {
       console.log("All images sent");
-       socket.disconnect();
+      socket.disconnect();
     });
     return () => {
       socket.disconnect();
       if (rafId.current) cancelAnimationFrame(rafId.current);
     };
   }, []);
-  // Request more frames if buffer is low while playing
+  // :arrow_down: Frame buffer check
   useEffect(() => {
     const interval = setInterval(() => {
-      if (frameCount - currentIndex < 10 && isPlaying) {
+      if (
+        frameCountRef.current - currentIndexRef.current < 10 &&
+        isPlaying
+      ) {
         socket.emit("next-batch");
       }
     }, 500);
     return () => clearInterval(interval);
-  }, [currentIndex, isPlaying, frameCount]);
-  // Draw current frame on canvas
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    const img = framesRef.current[currentIndex];
-    if (!img) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  }, [currentIndex]);
-  // Playback using requestAnimationFrame
+  }, [isPlaying]);
+  // :arrow_down: Animation Loop
   const play = () => {
     const baseFrameDuration = 1000 / 30;
     let lastFrameTime = performance.now();
     const step = (time: number) => {
       if (!isPlaying) return;
       if (time - lastFrameTime >= baseFrameDuration / speed) {
-        setCurrentIndex((prev) => {
-          if (prev < frameCount - 1) return prev + 1;
-          return prev;
-        });
+        if (currentIndexRef.current < frameCountRef.current - 1) {
+          currentIndexRef.current++;
+          drawFrame(currentIndexRef.current);
+        }
         lastFrameTime = time;
       }
       rafId.current = requestAnimationFrame(step);
     };
     rafId.current = requestAnimationFrame(step);
   };
+  // ⬇️ Control animation start/stop
   useEffect(() => {
-    if (isPlaying) {
-      play();
-    } else if (rafId.current) {
-      cancelAnimationFrame(rafId.current);
-    }
+    if (isPlaying) play();
+    else if (rafId.current) cancelAnimationFrame(rafId.current);
     return () => {
       if (rafId.current) cancelAnimationFrame(rafId.current);
     };
-  }, [isPlaying, speed, frameCount]);
-  // Sync sliderValue -> currentIndex with debounce
-  useEffect(() => {
-    const handler = setTimeout(() => {
-      setCurrentIndex(sliderValue);
-    }, 50);
-    return () => clearTimeout(handler);
-  }, [sliderValue]);
-
-  useEffect(() => {
-    if (sliderValue !== currentIndex) {
-      setSliderValue(currentIndex);
-    }
-  }, [currentIndex]);
+  }, [isPlaying, speed]);
+  // :arrow_down: Start streaming
   const startStreaming = () => {
     socket.connect();
     socket.emit("newMessage");
     setIsPlaying(true);
   };
-  const togglePlay = () => {
-    setIsPlaying((prev) => !prev);
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const index = parseInt(e.target.value);
+    currentIndexRef.current = index;
+    drawFrame(index);
   };
   return (
     <div className="min-h-screen bg-black flex flex-col items-center justify-center p-5">
@@ -116,14 +110,15 @@ export default function App() {
         <button
           onClick={() => {
             setIsPlaying(false);
-            setCurrentIndex((prev) => Math.max(0, prev - 1));
+            currentIndexRef.current = Math.max(0, currentIndexRef.current - 1);
+            drawFrame(currentIndexRef.current);
           }}
           title="Previous Frame"
         >
           <SkipBack />
         </button>
         <button
-          onClick={isPlaying ? togglePlay : startStreaming}
+          onClick={isPlaying ? () => setIsPlaying(false) : startStreaming}
           className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-700 transition"
           title={isPlaying ? "Pause" : "Play"}
         >
@@ -132,9 +127,11 @@ export default function App() {
         <button
           onClick={() => {
             setIsPlaying(false);
-            setCurrentIndex((prev) =>
-              Math.min(frameCount - 1, prev + 1)
+            currentIndexRef.current = Math.min(
+              frameCountRef.current - 1,
+              currentIndexRef.current + 1
             );
+            drawFrame(currentIndexRef.current);
           }}
           title="Next Frame"
         >
@@ -155,16 +152,26 @@ export default function App() {
         </label>
       </div>
       <input
+        ref={sliderRef}
         type="range"
         min={0}
         max={frameCount > 0 ? frameCount - 1 : 0}
-        value={sliderValue}
-        onChange={(e) => setSliderValue(parseInt(e.target.value))}
+        defaultValue={0}
+        onChange={handleSliderChange}
         className="w-[70%] mt-4"
       />
       <p className="text-gray-400 mt-2 text-sm">
-        Frame {currentIndex + 1} / {frameCount}
+        Frame {currentIndexRef.current + 1} / {frameCount}
       </p>
     </div>
   );
 }
+
+
+
+
+
+
+
+
+
