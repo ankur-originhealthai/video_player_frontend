@@ -2,279 +2,204 @@
 import React, { useEffect, useRef, useState } from "react";
 import io from "socket.io-client";
 import { Play, Pause, SkipBack, SkipForward } from "lucide-react";
-
-// Socket setup
 const socket = io("http://localhost:3002", { autoConnect: false });
-
 export default function App() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const sliderRef = useRef<HTMLInputElement>(null);
-  const framesRef = useRef<HTMLImageElement[]>([]);
-  const frameCountRef = useRef(0);
-  const currentIndexRef = useRef(0);
-  const rafId = useRef<number | null>(null);
-  const pendingImages = useRef<string[]>([]);
-  const lastFrameTimeRef = useRef<number>(0);
-  const targetFrameIntervalRef = useRef<number>(1000 / 30); // 30 FPS default
-  const isStreamingRef = useRef(false);
-  const hasRequestedMoreRef = useRef(false);
-
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const slider = useRef<HTMLInputElement>(null);
+  const images = useRef<HTMLImageElement[]>([]);
+  const totalFrames = useRef(0);
+  const currentFrameIndex = useRef(0);
+  const loopId = useRef<number | null>(null);
+  const waitingImages = useRef<string[]>([]);
+  const lastTime = useRef<number>(0);
+  const timePerFrame = useRef<number>(1000 / 30);
+  const streaming = useRef(false);
+  const askedForMore = useRef(false);
   const [frameCount, setFrameCount] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
-  const [isBuffering, setIsBuffering] = useState(false);
-  const [currentFrame, setCurrentFrame] = useState(0);
-
-  // 🖼️ Draw specific frame
-  const drawFrame = (index: number) => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    const img = framesRef.current[index];
-    if (!canvas || !ctx || !img) return;
-    
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    
-    if (sliderRef.current) {
-      sliderRef.current.value = index.toString();
-    }
-    setCurrentFrame(index);
+  const [loading, setLoading] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const draw = (index: number) => {
+    const ctx = canvas.current?.getContext("2d");
+    const img = images.current[index];
+    if (!canvas.current || !ctx || !img) return;
+    ctx.clearRect(0, 0, canvas.current.width, canvas.current.height);
+    ctx.drawImage(img, 0, 0, canvas.current.width, canvas.current.height);
+    if (slider.current) slider.current.value = index.toString();
+    setCurrent(index);
   };
 
-  const preloadPendingImages = () => {
-    const imagesToProcess = [...pendingImages.current];
-    pendingImages.current = [];
-
-    imagesToProcess.forEach((base64) => {
+  const loadImages = () => {
+    const list = [...waitingImages.current];
+    waitingImages.current = [];
+    list.forEach((src) => {
       const img = new Image();
       img.onload = () => {
-        framesRef.current.push(img);
-        frameCountRef.current++;
-        setFrameCount(frameCountRef.current);
-        
-        if (frameCountRef.current === 1 && currentIndexRef.current === 0) {
-          drawFrame(0);
-        }
+        images.current.push(img);
+        totalFrames.current++;
+        setFrameCount(totalFrames.current);
+        if (totalFrames.current === 1 && currentFrameIndex.current === 0)
+          draw(0);
       };
       img.onerror = () => {
-        console.warn("Failed to load image frame");
+        console.error("Failed to load image:", src);
       };
-      img.src = base64;
+      img.src = new URL(src, window.location.origin).href;
     });
   };
-
-  const checkBufferAndRequest = () => {
-    const bufferSize = frameCountRef.current - currentIndexRef.current;
-    const minBuffer = Math.max(10, Math.ceil(30 * speed)); 
-    
-    if (bufferSize < minBuffer && isStreamingRef.current && !hasRequestedMoreRef.current) {
-      hasRequestedMoreRef.current = true;
+  const checkAndAsk = () => {
+    const left = totalFrames.current - currentFrameIndex.current;
+    const min = Math.max(10, Math.ceil(30 * speed));
+    if (left < min && streaming.current && !askedForMore.current) {
+      askedForMore.current = true;
       socket.emit("next-batch");
-      
-
-      setTimeout(() => {
-        hasRequestedMoreRef.current = false;
-      }, 100);
+      setTimeout(() => (askedForMore.current = false), 100);
     }
   };
-
-  const playLoop = (currentTime: number) => {
-    if (!isPlaying) return;
-
-
-    const frameInterval = targetFrameIntervalRef.current / speed;
-    
-    if (currentTime - lastFrameTimeRef.current >= frameInterval) {
-      const nextIndex = currentIndexRef.current + 1;
-      
-
-      if (nextIndex < framesRef.current.length) {
-        currentIndexRef.current = nextIndex;
-        drawFrame(currentIndexRef.current);
-        lastFrameTimeRef.current = currentTime;
-        setIsBuffering(false);
-
-        checkBufferAndRequest();
+  const loop = (time: number) => {
+    if (!playing) return;
+    const gap = timePerFrame.current / speed;
+    if (time - lastTime.current >= gap) {
+      const next = currentFrameIndex.current + 1;
+      if (next < images.current.length) {
+        currentFrameIndex.current = next;
+        draw(currentFrameIndex.current);
+        lastTime.current = time;
+        setLoading(false);
+        checkAndAsk();
       } else {
-        
-        if (isStreamingRef.current) {
-          setIsBuffering(true);
-          checkBufferAndRequest();
+        if (streaming.current) {
+          setLoading(true);
+          checkAndAsk();
         } else {
-          setIsPlaying(false);
+          setPlaying(false);
           return;
         }
       }
     }
-
-    rafId.current = requestAnimationFrame(playLoop);
+    loopId.current = requestAnimationFrame(loop);
   };
-
   useEffect(() => {
-    socket.on("reply", (imageDataUrls: string[]) => {
-      pendingImages.current.push(...imageDataUrls);
-      preloadPendingImages();
+    socket.on("reply", (data: string[]) => {
+      waitingImages.current.push(...data);
+      loadImages();
     });
-
     socket.on("end-of-stream", () => {
-      console.log("All images sent");
-      isStreamingRef.current = false;
+      console.log("Done receiving");
+      streaming.current = false;
       socket.disconnect();
     });
-
     return () => {
       socket.disconnect();
-      if (rafId.current) cancelAnimationFrame(rafId.current);
+      if (loopId.current) cancelAnimationFrame(loopId.current);
     };
   }, []);
-
-  
   useEffect(() => {
-    if (isPlaying) {
-      lastFrameTimeRef.current = performance.now();
-      rafId.current = requestAnimationFrame(playLoop);
+    if (playing) {
+      lastTime.current = performance.now();
+      loopId.current = requestAnimationFrame(loop);
     } else {
-      if (rafId.current) {
-        cancelAnimationFrame(rafId.current);
-        rafId.current = null;
-      }
+      if (loopId.current) cancelAnimationFrame(loopId.current);
     }
-
     return () => {
-      if (rafId.current) {
-        cancelAnimationFrame(rafId.current);
-        rafId.current = null;
-      }
+      if (loopId.current) cancelAnimationFrame(loopId.current);
     };
-  }, [isPlaying, speed]);
-
-  // Update target frame interval when speed changes
+  }, [playing, speed]);
   useEffect(() => {
-    targetFrameIntervalRef.current = 1000 / 30; // Base 30 FPS
+    timePerFrame.current = 1000 / 30;
   }, []);
-
-  // 🎬 Start stream with intelligent pre-buffering
-  const startStreaming = () => {
-    if (isStreamingRef.current) {
-      // Already streaming, just start/resume playback
-      setIsPlaying(true);
+  const start = () => {
+    if (streaming.current) {
+      setPlaying(true);
       return;
     }
-
-    isStreamingRef.current = true;
-    setIsBuffering(true);
+    streaming.current = true;
+    setLoading(true);
     socket.connect();
     socket.emit("newMessage");
-
-    // Start playback when we have enough frames buffered
-    const checkBuffer = () => {
-      const minStartBuffer = 15; // Start playing when we have 15 frames
-      if (framesRef.current.length >= minStartBuffer) {
-        setIsPlaying(true);
-        setIsBuffering(false);
-      } else if (isStreamingRef.current) {
-        setTimeout(checkBuffer, 50);
+    const waitForStart = () => {
+      if (images.current.length >= 15) {
+        setPlaying(true);
+        setLoading(false);
+      } else if (streaming.current) {
+        setTimeout(waitForStart, 50);
       }
     };
-
-    setTimeout(checkBuffer, 100);
+    setTimeout(waitForStart, 100);
   };
-
-  // ↔️ Slider with smooth seeking
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const moveSlider = (e: React.ChangeEvent<HTMLInputElement>) => {
     const index = parseInt(e.target.value);
-    if (index >= 0 && index < framesRef.current.length) {
-      currentIndexRef.current = index;
-      drawFrame(index);
+    if (index >= 0 && index < images.current.length) {
+      currentFrameIndex.current = index;
+      draw(index);
     }
   };
-
-  // 🎮 Frame navigation
-  const previousFrame = () => {
-    const wasPlaying = isPlaying;
-    setIsPlaying(false);
-    
-    const newIndex = Math.max(0, currentIndexRef.current - 1);
-    currentIndexRef.current = newIndex;
-    drawFrame(newIndex);
-    
-    if (wasPlaying) {
-      setTimeout(() => setIsPlaying(true), 50);
-    }
+  const back = () => {
+    const was = playing;
+    setPlaying(false);
+    const newIndex = Math.max(0, currentFrameIndex.current - 1);
+    currentFrameIndex.current = newIndex;
+    draw(newIndex);
+    if (was) setTimeout(() => setPlaying(true), 50);
   };
-
-  const nextFrame = () => {
-    const wasPlaying = isPlaying;
-    setIsPlaying(false);
-    
-    const newIndex = Math.min(frameCountRef.current - 1, currentIndexRef.current + 1);
-    currentIndexRef.current = newIndex;
-    drawFrame(newIndex);
-    
-    if (wasPlaying) {
-      setTimeout(() => setIsPlaying(true), 50);
-    }
+  const forward = () => {
+    const was = playing;
+    setPlaying(false);
+    const newIndex = Math.min(
+      totalFrames.current - 1,
+      currentFrameIndex.current + 1
+    );
+    currentFrameIndex.current = newIndex;
+    draw(newIndex);
+    if (was) setTimeout(() => setPlaying(true), 50);
   };
-
-  // 🎯 Reset and restart
-  const resetPlayer = () => {
-    setIsPlaying(false);
-    currentIndexRef.current = 0;
-    if (framesRef.current.length > 0) {
-      drawFrame(0);
-    }
+  const restart = () => {
+    setPlaying(false);
+    currentFrameIndex.current = 0;
+    if (images.current.length > 0) draw(0);
   };
-
-  // 🖥️ UI
   return (
     <div className="min-h-screen bg-black flex flex-col items-center justify-center p-5">
-      <h1 className="text-white text-xl font-semibold mb-3">
-        Video Playerr
-      </h1>
-
+      <h1 className="text-white text-xl font-semibold mb-3">Video Player</h1>
       <canvas
-        ref={canvasRef}
+        ref={canvas}
         width={640}
         height={480}
         className="bg-black rounded shadow-md border border-gray-700"
       />
-
       <div className="flex items-center gap-4 mt-4 text-white">
         <button
-          onClick={previousFrame}
-          disabled={currentFrame === 0}
+          onClick={back}
+          disabled={current === 0}
           className="p-2 bg-gray-600 rounded hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
           title="Previous Frame"
         >
           <SkipBack size={20} />
         </button>
-
         <button
-          onClick={isPlaying ? () => setIsPlaying(false) : startStreaming}
+          onClick={playing ? () => setPlaying(false) : start}
           className="px-4 py-2 bg-blue-500 rounded flex items-center gap-4"
-          title={isPlaying ? "Pause" : "Play"}
+          title={playing ? "Pause" : "Play"}
         >
-          {isPlaying ? <Pause size={20} /> : <Play size={20} />}
-          {isPlaying ? "Pause" : "Play"}
+          {playing ? <Pause size={20} /> : <Play size={20} />}
+          {playing ? "Pause" : "Play"}
         </button>
-
         <button
-          onClick={nextFrame}
-          disabled={currentFrame >= frameCount - 1}
+          onClick={forward}
+          disabled={current >= frameCount - 1}
           className="p-2 bg-gray-600 rounded hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
           title="Next Frame"
         >
           <SkipForward size={20} />
         </button>
-
         <button
-          onClick={resetPlayer}
+          onClick={restart}
           className="px-3 py-2 bg-gray-600 rounded hover:bg-gray-700 transition text-sm"
           title="Reset to beginning"
         >
           Reset
         </button>
-
         <label className="ml-6">
           <span className="text-sm text-gray-300 mr-2">Speed:</span>
           <select
@@ -282,47 +207,32 @@ export default function App() {
             onChange={(e) => setSpeed(Number(e.target.value))}
             className="bg-neutral-800 text-white px-2 py-1 rounded border border-neutral-700"
           >
-           
             <option value={0.5}>0.5x</option>
             <option value={1}>1x</option>
             <option value={1.5}>1.5x</option>
             <option value={2}>2x</option>
-      
           </select>
         </label>
       </div>
-
       <input
-        ref={sliderRef}
+        ref={slider}
         type="range"
         min={0}
         max={frameCount > 0 ? frameCount - 1 : 0}
-        value={currentFrame}
-        onChange={handleSliderChange}
+        value={current}
+        onChange={moveSlider}
         className="w-[70%] mt-4"
       />
-
       <div className="flex items-center gap-4 mt-2 text-sm">
         <p className="text-gray-400">
-          Frame {currentFrame + 1} / {frameCount}
+          Frame {current + 1} / {frameCount}
         </p>
-        
         {frameCount > 0 && (
-          <p className="text-gray-500">
-            Buffer: {frameCount - currentFrame} frames
-          </p>
+          <p className="text-gray-500">Buffer: {frameCount - current} frames</p>
         )}
-        
-        {isBuffering && (
-          <p className="text-yellow-400 animate-pulse">
-            Buffering...
-          </p>
-        )}
-        
-        {!isStreamingRef.current && frameCount > 0 && (
-          <p className="text-green-400">
-            Completed
-          </p>
+        {loading && <p className="text-yellow-400">Buffering...</p>}
+        {!streaming.current && frameCount > 0 && (
+          <p className="text-green-400">Completed</p>
         )}
       </div>
     </div>
